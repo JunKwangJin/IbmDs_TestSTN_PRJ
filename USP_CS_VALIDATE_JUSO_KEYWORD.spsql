@@ -1,0 +1,85 @@
+CREATE OR REPLACE PROCEDURE "GADMIN"."USP_CS_VALIDATE_JUSO_KEYWORD" 
+(
+    IN p_raw_keyword VARCHAR(255),   -- 사용자 입력 원본 검색어
+    OUT p_validation_code INTEGER,   -- 0: OK, 1: 경고 (Warning), -1: 오류 (Error)
+    OUT p_validation_message VARCHAR(500) -- 사용자에게 보여줄 메시지
+)
+P1: BEGIN
+    DECLARE v_trimmed_keyword VARCHAR(255);
+    DECLARE v_is_numeric_only INTEGER;
+    DECLARE v_contains_special_char INTEGER;
+    DECLARE v_is_sql_injection_attempt INTEGER;
+
+    -- 초기화
+    SET p_validation_code = 0;
+    SET p_validation_message = '검색어를 사용해도 안전합니다.';
+
+    -- 1. 앞뒤 공백 제거
+    SET v_trimmed_keyword = TRIM(p_raw_keyword);
+
+    -- 2. 검색어가 비었거나 너무 짧은 경우 (오류 처리)
+    IF v_trimmed_keyword IS NULL OR LENGTH(v_trimmed_keyword) < 2 THEN
+        SET p_validation_code = -1; -- 오류 코드
+        SET p_validation_message = '🚫 오류: 검색어를 2글자 이상 입력해주세요.';
+        RETURN;
+    END IF;
+
+    -- 3. 숫자로만 구성되어 있는지 판단 (경고 대상)
+    -- 우리 만든 IS_NUMBER_UDF 함수 활용. (스키마명 꼭 넣어줘야 함!)
+    SET v_is_numeric_only = GADMIN.USF_CS_ISNUMBER(v_trimmed_keyword);
+
+    IF v_is_numeric_only = 1 THEN
+        SET p_validation_code = 1; -- 경고 코드
+        SET p_validation_message = '⚠️ 경고: 입력된 내용이 숫자로만 되어 있습니다. 건물 번호일 경우 정확한 주소 검색이 어려울 수 있습니다.';
+        RETURN; -- 경고 메시지는 하나만 보내므로 바로 리턴. 여러 경고를 보내고 싶으면 RETURN 삭제 후 p_validation_message에 메시지들 합치기.
+    END IF;
+
+    -- 4. SQL 명령어 포함 여부 판단 (SQL Injection 의심 -> 경고/오류 처리)
+    -- 간단한 키워드 체크 (AND, OR, SELECT, DELETE, DROP 등)
+    -- 이 부분은 완벽한 SQL Injection 방지는 못함. 방지는 PREPARED STATEMENT가 핵심!
+    -- 대소문자 구분 없이 체크하기 위해 LOWER 함수 사용
+    SET v_is_sql_injection_attempt = 0;
+
+    IF LOCATE(LOWER(v_trimmed_keyword), ' or ') > 0 OR
+       LOCATE(LOWER(v_trimmed_keyword), ' and ') > 0 OR
+       LOCATE(LOWER(v_trimmed_keyword), ' select ') > 0 OR
+       LOCATE(LOWER(v_trimmed_keyword), ' delete ') > 0 OR
+       LOCATE(LOWER(v_trimmed_keyword), ' drop ') > 0 OR
+       LOCATE(LOWER(v_trimmed_keyword), ' update ') > 0 OR
+       LOCATE(LOWER(v_trimmed_keyword), ' insert ') > 0 OR
+       LOCATE(v_trimmed_keyword, ';') > 0 OR -- 다중 SQL 명령 시도
+       LOCATE(v_trimmed_keyword, '--') > 0 THEN -- 주석 처리 시도
+        SET v_is_sql_injection_attempt = 1;
+    END IF;
+
+    IF v_is_sql_injection_attempt = 1 THEN
+        SET p_validation_code = -1; -- 오류 코드 (이건 경고보다는 위험한 시도로 판단)
+        SET p_validation_message = '🚨 오류: SQL 명령어 또는 특수 문자가 포함된 검색어는 허용되지 않습니다.';
+        RETURN;
+    END IF;
+
+    -- 5. 일반적인 특수문자 포함 여부 판단 (경고 대상)
+    -- 주소에 흔히 쓰이는 특수문자 (예: -,(),/,.,#,')는 제외하고 검사.
+    -- 정규식을 지원하는 DB2 버전 (10.5 이상)에서는 REGEXP_LIKE 활용
+    -- `[^가-힣a-zA-Z0-9\s.,()-/]` : 한글, 영문, 숫자, 공백, . , ( ) - / 를 제외한 모든 문자
+    -- 이런 패턴이 발견되면 특수문자가 포함된 것으로 간주.
+    SET v_contains_special_char = 0;
+    IF REGEXP_LIKE(v_trimmed_keyword, '[^가-힣a-zA-Z0-9\\s.,()\\-/]') = 1 THEN -- v10.5부터는 \\가 필요할 수 있음
+         SET v_contains_special_char = 1;
+    END IF;
+
+    IF v_contains_special_char = 1 THEN
+        -- 이미 숫자로만 구성되어 있다는 경고가 나갔으면 덮어쓰지 않음
+        -- 만약 여러 경고를 한 메시지에 담고 싶다면 p_validation_message = p_validation_message || ' 그리고 특수문자도 포함됨' 이런 식으로 추가
+        IF p_validation_code = 0 THEN -- 아직 경고나 오류가 없었을 때만
+            SET p_validation_code = 1; -- 경고 코드
+            SET p_validation_message = '⚠️ 경고: 검색어에 특수문자가 포함되어 있습니다. 검색 결과가 예상과 다를 수 있습니다.';
+        END IF;
+    END IF;
+
+    -- 최종 반환 메시지가 비어있다면, OK
+    IF p_validation_code = 0 THEN
+        SET p_validation_message = '검색어 유효성 검사 완료.';
+    END IF;
+
+END P1 

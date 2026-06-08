@@ -1,0 +1,10 @@
+.metadata/
+.settings/
+.conInfo
+.meta/
+.projInfo
+.webServicesInfo
+bin/
+*.tmp
+*.log
+*.bak
